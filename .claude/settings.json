@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[시작 전 체크] 관련 매뉴얼을 먼저 확인했는가? docs/tasks/에 진행중인 작업 문서가 있는가?'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/quality_check.py"
+          }
+        ]
+      }
+    ]
+  }
+}
