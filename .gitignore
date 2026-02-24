@@ -1,0 +1,25 @@
+# 환경변수 (API 키 포함 - 절대 커밋 금지)
+.env
+.env.local
+.env.production
+
+# Firebase
+google-services.json
+GoogleService-Info.plist
+
+# Node
+node_modules/
+
+# React Native
+android/
+ios/
+*.keystore
+*.jks
+
+# Build
+build/
+dist/
+
+# 기타
+.DS_Store
+*.log
