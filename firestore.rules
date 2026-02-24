@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 사용자 프로필: 본인만 읽기/쓰기 (건강 정보 포함 민감 데이터)
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 식단 기록: 본인만 접근 (서브컬렉션)
+    match /meals/{userId}/entries/{mealId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // AI 코칭 대화: 본인만 접근
+    match /coaching/{userId}/conversations/{conversationId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 구독 정보: 본인 읽기 가능, 쓰기는 Cloud Function만 (클라이언트 조작 방지)
+    match /subscriptions/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false; // Cloud Function(서비스 계정)에서만 쓰기
+    }
+
+    // 일별 점수 통계: 본인만 접근
+    match /dailyScores/{userId}/records/{date} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
