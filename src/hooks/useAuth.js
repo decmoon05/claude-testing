@@ -16,9 +16,15 @@ const useAuth = () => {
     const unsubscribe = subscribeAuthState(async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser);
-        // Firestore에서 프로필 로드
-        const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-        setProfile(snap.exists() ? snap.data() : null);
+        try {
+          // Firestore에서 프로필 로드
+          const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+          setProfile(snap.exists() ? snap.data() : null);
+        } catch (error) {
+          // 네트워크 오류 등으로 프로필 로드 실패 시 로그아웃 처리
+          console.error('프로필 로드 실패:', error);
+          clearAuth();
+        }
       } else {
         clearAuth();
       }

@@ -167,17 +167,28 @@ export const analyzeScoreFactors = (items) => {
 };
 
 /**
- * pHash 유사 이미지 해시 계산 (간소화 버전)
- * 실제 구현 시 react-native-image-hash 또는 서버사이드 pHash 라이브러리 사용
+ * 이미지 콘텐츠 기반 해시 계산
+ * - 실제 배포 시 react-native-image-hash 라이브러리의 pHash로 교체한다
+ * - Date.now() / Math.random() 등 가변 값을 절대 섞지 않는다 (api.md §8 참고)
+ * @param {string} imageUri - 로컬 이미지 URI
+ * @returns {string} 이미지 콘텐츠 기반 해시값
  */
 export const computeImageHash = async (imageUri) => {
-  // 실제 구현에서는 pHash 알고리즘 적용
-  // 여기서는 URI 기반 간단 해시 반환 (플레이스홀더)
-  const str = imageUri + Date.now();
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
+  try {
+    // 이미지 파일을 바이너리로 읽어 해시 계산 (콘텐츠 기반 → 동일 이미지 = 동일 해시)
+    const response = await fetch(imageUri);
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+
+    // djb2 해시: 이미지 픽셀 데이터만 입력 (가변값 없음)
+    let hash = 5381;
+    for (let i = 0; i < bytes.length; i++) {
+      hash = ((hash << 5) + hash) ^ bytes[i];
+      hash |= 0; // 32bit 정수 유지
+    }
+    return Math.abs(hash).toString(16);
+  } catch {
+    // 해시 계산 실패 시 null 반환 → 중복 체크 건너뜀 (saveMealEntry에서 처리)
+    return null;
   }
-  return Math.abs(hash).toString(16);
 };

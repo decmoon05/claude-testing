@@ -8,17 +8,17 @@ const admin = require('firebase-admin');
 
 const db = admin.firestore();
 const SUBSCRIPTION_PRICE = 9900;
+const BATCH_SIZE = 100; // api.md §7: 100명씩 배치 처리
 
 /**
  * 성실도 기반 환급 퍼센트 계산 (서버사이드 신뢰 계산)
  */
-const calculateRefundPercent = (recordCount, avgScore) => {
+const calculateRefundPercent = (recordedDays, avgScore) => {
   let percent = 0;
-  if (recordCount >= 25) percent = 50;
-  else if (recordCount >= 20) percent = 30;
-  else if (recordCount >= 15) percent = 10;
+  if (recordedDays >= 25) percent = 50;
+  else if (recordedDays >= 20) percent = 30;
+  else if (recordedDays >= 15) percent = 10;
 
-  // 평균 비정제지수 70점 이상 시 보너스
   if (percent > 0 && avgScore >= 70) percent += 10;
   return Math.min(60, percent);
 };
@@ -26,7 +26,6 @@ const calculateRefundPercent = (recordCount, avgScore) => {
 /**
  * 지난달 기록 집계
  * - 하루 최대 3끼 인정
- * - 기록 간 2시간 간격 강제 (이미 saveMealEntry에서 검증됨)
  */
 const aggregateLastMonthRecords = async (userId) => {
   const now = new Date();
@@ -62,57 +61,84 @@ const aggregateLastMonthRecords = async (userId) => {
   return { recordedDays, avgScore };
 };
 
+/**
+ * 사용자 1명 처리: 집계 → 저장 → 알림
+ */
+const processUser = async (userId, lastMonthStr) => {
+  const { recordedDays, avgScore } = await aggregateLastMonthRecords(userId);
+  const refundPercent = calculateRefundPercent(recordedDays, avgScore);
+  const refundAmount = Math.round(SUBSCRIPTION_PRICE * (refundPercent / 100));
+
+  // subscriptions 문서 리셋 (이번 달 카운터 초기화)
+  await db.collection('subscriptions').doc(userId).update({
+    'currentMonth.recordCount': 0,
+    'currentMonth.avgScore': 0,
+    'currentMonth.earnedRefund': 0,
+  });
+
+  // api.md §: refundHistory는 서브컬렉션으로 분리 (문서 크기 제한 방지)
+  await db
+    .collection('subscriptions')
+    .doc(userId)
+    .collection('refundHistory')
+    .doc(lastMonthStr)
+    .set({
+      month: lastMonthStr,
+      recordedDays,
+      avgScore,
+      refundPercent,
+      amount: refundAmount,
+      calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+  // FCM 알림 (환급 발생 시에만)
+  if (refundAmount > 0) {
+    const userDoc = await db.collection('users').doc(userId).get();
+    const fcmToken = userDoc.data()?.fcmToken;
+    if (fcmToken) {
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: {
+          title: '환급 포인트가 적립됐어요!',
+          body: `지난달 성실도 ${refundPercent}% → ${refundAmount.toLocaleString()}원 적립 완료!`,
+        },
+      }).catch((err) => {
+        // FCM 실패는 환급 처리에 영향 없음
+        functions.logger.warn(`FCM failed for ${userId}`, err.message);
+      });
+    }
+  }
+};
+
 exports.monthlyRefundCalculation = functions.pubsub
-  .schedule('0 0 1 * *')  // 매월 1일 00:00
+  .schedule('0 0 1 * *')
   .timeZone('Asia/Seoul')
   .onRun(async () => {
     const usersSnap = await db.collection('subscriptions').where('isActive', '==', true).get();
+    const userIds = usersSnap.docs.map((d) => d.id);
 
-    const promises = usersSnap.docs.map(async (doc) => {
-      const userId = doc.id;
-      try {
-        const { recordedDays, avgScore } = await aggregateLastMonthRecords(userId);
-        const refundPercent = calculateRefundPercent(recordedDays, avgScore);
-        const refundAmount = Math.round(SUBSCRIPTION_PRICE * (refundPercent / 100));
+    const lastMonthStr = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)
+      .toISOString()
+      .slice(0, 7);
 
-        const lastMonthStr = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)
-          .toISOString()
-          .slice(0, 7);
+    let successCount = 0;
+    let failCount = 0;
 
-        await db.collection('subscriptions').doc(userId).update({
-          'currentMonth.recordCount': 0,
-          'currentMonth.avgScore': 0,
-          'currentMonth.earnedRefund': 0,
-          refundHistory: admin.firestore.FieldValue.arrayUnion({
-            month: lastMonthStr,
-            recordedDays,
-            avgScore,
-            refundPercent,
-            amount: refundAmount,
-            calculatedAt: new Date().toISOString(),
-          }),
-        });
-
-        // 푸시 알림 발송 (FCM)
-        if (refundAmount > 0) {
-          const userDoc = await db.collection('users').doc(userId).get();
-          const fcmToken = userDoc.data()?.fcmToken;
-          if (fcmToken) {
-            await admin.messaging().send({
-              token: fcmToken,
-              notification: {
-                title: '환급 포인트가 적립됐어요!',
-                body: `지난달 성실도 ${refundPercent}% → ${refundAmount.toLocaleString()}원 적립 완료!`,
-              },
-            });
-          }
+    // api.md §7: 100명씩 배치 처리 (동시 요청 폭발 방지)
+    for (let i = 0; i < userIds.length; i += BATCH_SIZE) {
+      const batch = userIds.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map((userId) => processUser(userId, lastMonthStr))
+      );
+      results.forEach((r) => {
+        if (r.status === 'fulfilled') successCount++;
+        else {
+          failCount++;
+          functions.logger.error('processUser failed', r.reason);
         }
-      } catch (error) {
-        console.error(`Failed to process userId: ${userId}`, error);
-      }
-    });
+      });
+    }
 
-    await Promise.all(promises);
-    console.log(`Monthly refund processed for ${usersSnap.size} users`);
+    functions.logger.info(`Monthly refund done: ${successCount} success, ${failCount} fail`);
     return null;
   });
